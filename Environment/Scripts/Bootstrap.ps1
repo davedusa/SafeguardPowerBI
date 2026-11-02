@@ -16,6 +16,9 @@ try {
     New-Variable -Name BINARIES -Value $(Join-Path -Path $VENV_DIR -ChildPath "bin") -Option Constant
     New-Variable -Name PACKAGES -Value $(Join-Path -Path $VENV_DIR -ChildPath "packages") -Option Constant
 
+    $bootstrapMarker = Join-Path -Path $VENV_DIR -ChildPath "BOOTSRAP_FINISHED_FLAG"
+    Remove-Item -Path $bootstrapMarker -Force -ErrorAction SilentlyContinue
+
     $packageVersions = Get-Content -Raw -Path $CONFIG_DIR\packageVersions.json | ConvertFrom-Json
     New-Variable -Name SDK_TOOLS -Value `
     $(Join-Path -Path $PACKAGES -ChildPath "Microsoft.PowerQuery.SdkTools.$($packageVersions.PowerQuerySDKVersion)\tools") -Option Constant
@@ -42,9 +45,14 @@ try {
     }
 
     $job = Start-Job -Name DotnetInstall -ScriptBlock {
+        $ErrorActionPreference = "Stop"
         switch ($input) {
             { $true } {
+                $global:LASTEXITCODE = 0
                 & $_.DotnetInstall -InstallDir $_.InstallDir -NoPath -Verbose -Version $_.Version
+                if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                    throw ".NET SDK installer exited with code $LASTEXITCODE."
+                }
             }
         }
     } -InputObject @{
@@ -57,12 +65,25 @@ try {
 
     $timeOutInSeconds = 600
     Wait-Job -Id $jobIDs -Timeout $timeOutInSeconds
-    Receive-Job -Id $jobIDs -ErrorAction Stop
 
-    if ($(Get-Job -Id $jobIDs).Where({ $_.State -eq "Running" }, "First").Count -gt 0) {
+    $runningInstallerJobs = @(Get-Job -Id $jobIDs | Where-Object { $_.State -eq "Running" })
+    if ($runningInstallerJobs.Count -gt 0) {
         Write-Host "Timeout reached. Stopping the .NET SDK installer download job."
         Stop-Job -Id $jobIDs
         throw "Failed to download and install the .NET SDK within $($timeOutInSeconds) seconds."
+    }
+
+    Receive-Job -Id $jobIDs -ErrorAction Stop
+
+    $installerJobs = @(Get-Job -Id $jobIDs -IncludeChildJob)
+    if ($installerJobs.Count -eq 0 -or @($installerJobs | Where-Object { $_.State -ne "Completed" }).Count -gt 0) {
+        $installerStates = ($installerJobs | ForEach-Object { "$($_.Name): $($_.State)" }) -join ", "
+        throw ".NET SDK installer job did not complete successfully. $installerStates"
+    }
+
+    $installerErrors = @($installerJobs | ForEach-Object { $_.ChildJobs | ForEach-Object { $_.Error } } | Where-Object { $null -ne $_ })
+    if ($installerErrors.Count -gt 0) {
+        throw ".NET SDK installer job reported an error: $($installerErrors[0])"
     }
 
     Write-Output "Downloading nuget executable"
@@ -74,7 +95,10 @@ try {
     Write-Output "Installing PowerQuery SDK Tools"
     & nuget install Microsoft.PowerQuery.SdkTools -ConfigFile $CONFIG_DIR\nuget.config -DirectDownload `
         -Version $packageVersions.PowerQuerySDKVersion
-    
+    if ($LASTEXITCODE -ne 0) {
+        throw "NuGet failed to install Power Query SDK tools with exit code $LASTEXITCODE."
+    }
+
     Get-ChildItem -Path $dir\..\..\ -Filter "Safeguard*" | ForEach-Object -Process {
         
         New-Variable -Name PROJECT_DIR -Value $(Join-Path -Path $ROOT_DIR -Childpath $_) -Force
@@ -100,7 +124,7 @@ try {
     }   
 
     Write-Output "Bootstrap finished"
-    [void](New-Item -ItemType "file" -Path "$VENV_DIR\BOOTSRAP_FINISHED_FLAG")
+    [void](New-Item -ItemType "file" -Path $bootstrapMarker)
 }
 catch {
     Write-Output $_.Exception.Message
