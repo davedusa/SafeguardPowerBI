@@ -183,6 +183,9 @@ function Test-UnitTestResultsAndNativeFailures {
         @{ Name = "missing-status"; Json = '[{"Name":"sample","Output":{},"Error":{"Message":"error"}}]'; ExitCode = 0; ExpectedSuccess = $false },
         @{ Name = "test-error"; Json = '[{"Name":"sample","Output":{"Result":null},"Error":{"Message":"error","Details":"failed"}}]'; ExitCode = 0; ExpectedSuccess = $false },
         @{ Name = "test-failure"; Json = '[{"Name":"sample","Output":{"Result":"Fail","Details":[]}}]'; ExitCode = 0; ExpectedSuccess = $false },
+        @{ Name = "array-success"; Json = '[{"Name":"sample","Status":"Passed","Output":[{"Result":"Success","Notes":"All passed"}]}]'; ExitCode = 0; ExpectedSuccess = $true },
+        @{ Name = "array-failure"; Json = '[{"Name":"sample","Status":"Failed","Output":[{"Result":"Fail","Notes":"An assertion failed"}]}]'; ExitCode = 0; ExpectedSuccess = $false },
+        @{ Name = "array-missing-status"; Json = '[{"Name":"sample","Status":"Passed","Output":[{"Notes":"No result status"}]}]'; ExitCode = 0; ExpectedSuccess = $false },
         @{ Name = "success"; Json = '[{"Name":"sample","Output":{"Result":"Success"}}]'; ExitCode = 0; ExpectedSuccess = $true }
     )
 
