@@ -312,8 +312,8 @@ function Gh(args, { allowFailure = false, input } = {}) {
   return result;
 }
 
-function ApiGet(endpoint, { notFound = false } = {}) {
-  const result = Gh(['--include', endpoint], { allowFailure: notFound });
+function ApiGet(endpoint, { notFound = false } = {}, gh = Gh) {
+  const result = gh(['--include', endpoint], { allowFailure: notFound });
   const statusLine = result.stdout.split(/\r?\n/, 1)[0] ?? '';
   const status = Number(/\s(\d{3})\s/.exec(statusLine)?.[1]);
   if (result.status !== 0) {
@@ -393,38 +393,51 @@ function NormalizeRelease(release) {
   };
 }
 
-function GitHubAdapter(repository) {
+async function FindRelease(repoPath, tag, Get) {
+  let match = null;
+  for (let page = 1; ; page += 1) {
+    // The by-tag endpoint does not reliably return drafts, even to their owner.
+    const releases = await Get(`repos/${repoPath}/releases?per_page=100&page=${page}`);
+    Assert(Array.isArray(releases), 'GitHub API returned an invalid release listing');
+    for (const release of releases) {
+      if (release.tag_name !== tag) continue;
+      Assert(!match, `Multiple releases match tag '${tag}'; resolve the conflicting releases before retrying`);
+      match = release;
+    }
+    if (releases.length < 100) return match ? NormalizeRelease(match) : null;
+  }
+}
+
+function GitHubAdapter(repository, gh = Gh) {
+  const Get = (endpoint, options) => ApiGet(endpoint, options, gh);
   const repoPath = EncodedRepository(repository);
   const Ref = (type, name) => `repos/${repoPath}/git/ref/${type}/${EncodedGitRef(name)}`;
-  const ReleaseByTag = (tag) => `repos/${repoPath}/releases/tags/${encodeURIComponent(tag)}`;
   return {
     async GetPermission(login) {
-      const result = ApiGet(`repos/${repoPath}/collaborators/${encodeURIComponent(login)}/permission`);
+      const result = Get(`repos/${repoPath}/collaborators/${encodeURIComponent(login)}/permission`);
       return result.permission;
     },
     async GetBranch(name) {
-      const result = ApiGet(Ref('heads', name), { notFound: true });
+      const result = Get(Ref('heads', name), { notFound: true });
       return result?.object?.sha ?? null;
     },
     async GetTag(name) {
-      const result = ApiGet(Ref('tags', name), { notFound: true });
+      const result = Get(Ref('tags', name), { notFound: true });
       if (!result) return null;
-      return NormalizeTag(result, (sha) => ApiGet(`repos/${repoPath}/git/tags/${sha}`).object);
+      return NormalizeTag(result, (sha) => Get(`repos/${repoPath}/git/tags/${sha}`).object);
     },
     async GetRelease(tag) {
-      const result = ApiGet(ReleaseByTag(tag), { notFound: true });
-      if (!result) return null;
-      return NormalizeRelease(result);
+      return FindRelease(repoPath, tag, Get);
     },
     async FindDuplicateRequest(tag, issueNumber) {
       const [connectorVersion, spsVersion] = tag.slice(1).split('+sps');
       const query = encodeURIComponent(`repo:${repository} is:issue is:open "safeguard-sessions-release-request-v1" "${connectorVersion}" "${spsVersion}"`);
-      const result = ApiGet(`search/issues?q=${query}&per_page=100`);
+      const result = Get(`search/issues?q=${query}&per_page=100`);
       return result.items.some((candidate) => candidate.number !== issueNumber);
     },
     async FindConflictingBranch(versionPrefix, issuePrefix) {
-      const versionRefs = ApiGet(`repos/${repoPath}/git/matching-refs/heads/${EncodedGitRef(versionPrefix)}`);
-      const issueRefs = ApiGet(`repos/${repoPath}/git/matching-refs/heads/${EncodedGitRef(issuePrefix)}`);
+      const versionRefs = Get(`repos/${repoPath}/git/matching-refs/heads/${EncodedGitRef(versionPrefix)}`);
+      const issueRefs = Get(`repos/${repoPath}/git/matching-refs/heads/${EncodedGitRef(issuePrefix)}`);
       return versionRefs.some((item) => item.ref.startsWith(`refs/heads/${versionPrefix}`))
         || issueRefs.some((item) => item.ref.startsWith(`refs/heads/${issuePrefix}`));
     },
@@ -512,10 +525,10 @@ function VerifyCommitFiles(root, plan) {
   return { files, notes: verified.notes };
 }
 
-function ApiRequest(repository, endpoint, { method = 'GET', body, allowFailure = false } = {}) {
+function ApiRequest(repository, endpoint, { method = 'GET', body, allowFailure = false } = {}, gh = Gh) {
   const args = ['--include', '--method', method, endpoint];
   if (body !== undefined) args.push('--input', '-');
-  const result = Gh(args, {
+  const result = gh(args, {
     allowFailure,
     input: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -534,19 +547,19 @@ function ApiRequest(repository, endpoint, { method = 'GET', body, allowFailure =
   return { status, body: text ? JSON.parse(text) : null };
 }
 
-function MakePublisher(repository) {
+function MakePublisher(repository, gh = Gh) {
+  const Request = (endpoint, options) => ApiRequest(repository, endpoint, options, gh);
   const repoPath = EncodedRepository(repository);
   const RefPath = (type, name) => `repos/${repoPath}/git/ref/${type}/${EncodedGitRef(name)}`;
-  const ReleasePath = (tag) => `repos/${repoPath}/releases/tags/${encodeURIComponent(tag)}`;
   return {
     async GetTag(tag) {
-      const result = ApiRequest(repository, RefPath('tags', tag), { allowFailure: true });
+      const result = Request(RefPath('tags', tag), { allowFailure: true });
       if (result.status === 404) return null;
       Assert(result.status < 400, `Could not read tag '${tag}'`);
-      return NormalizeTag(result.body, (sha) => ApiRequest(repository, `repos/${repoPath}/git/tags/${sha}`).body.object);
+      return NormalizeTag(result.body, (sha) => Request(`repos/${repoPath}/git/tags/${sha}`).body.object);
     },
     async CreateTag(tag, sha) {
-      const response = ApiRequest(repository, `repos/${repoPath}/git/refs`, {
+      const response = Request(`repos/${repoPath}/git/refs`, {
         method: 'POST',
         body: { ref: `refs/tags/${tag}`, sha },
         allowFailure: true,
@@ -554,13 +567,10 @@ function MakePublisher(repository) {
       if (response.status >= 400) throw new Error(`Could not create release tag '${tag}' (HTTP ${response.status})`);
     },
     async GetRelease(tag) {
-      const response = ApiRequest(repository, ReleasePath(tag), { allowFailure: true });
-      if (response.status === 404) return null;
-      Assert(response.status < 400, `Could not read release '${tag}'`);
-      return NormalizeRelease(response.body);
+      return FindRelease(repoPath, tag, (endpoint) => Request(endpoint).body);
     },
     async CreateDraftRelease(input) {
-      const response = ApiRequest(repository, `repos/${repoPath}/releases`, {
+      const response = Request(`repos/${repoPath}/releases`, {
         method: 'POST',
         body: {
           tag_name: input.tag,
@@ -580,7 +590,7 @@ function MakePublisher(repository) {
       };
     },
     async DeleteAsset(id) {
-      const response = ApiRequest(repository, `repos/${repoPath}/releases/assets/${id}`, {
+      const response = Request(`repos/${repoPath}/releases/assets/${id}`, {
         method: 'DELETE',
         allowFailure: true,
       });
@@ -752,7 +762,7 @@ async function PublishPrepared() {
     const adapter = GitHubAdapter(repository);
     const tag = await adapter.GetTag(plan.release.tag);
     Assert(!tag, `Release tag '${plan.release.tag}' appeared after preparation`);
-    const release = ApiGet(`repos/${apiRepo}/releases/tags/${encodeURIComponent(plan.release.tag)}`, { notFound: true });
+    const release = await adapter.GetRelease(plan.release.tag);
     Assert(!release, `Release '${plan.release.tag}' appeared after preparation`);
     const [duplicateRequest, conflictingBranch] = await Promise.all([
       adapter.FindDuplicateRequest(plan.release.tag, plan.issueNumber),
@@ -989,6 +999,8 @@ async function Main() {
 }
 
 module.exports = {
+  GitHubAdapter,
+  MakePublisher,
   AuthorizeIssueAuthor,
   CreatePreparationPlan,
   ValidateBranchName,

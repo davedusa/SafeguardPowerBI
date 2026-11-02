@@ -14,6 +14,8 @@ const {
   ValidatePreparedArtifact,
   PublishDraftRelease,
   VerifyCommitFiles,
+  GitHubAdapter,
+  MakePublisher,
 } = require('./Workflow.cjs');
 const { VerifyReleaseFiles } = require('./Request.cjs');
 
@@ -268,6 +270,130 @@ function FakeGitHub({ tagSha = null, release = null, failUploadName = null } = {
   };
   return { github, calls, state };
 }
+
+function ReleaseApiFixture(releases, { listingStatus = 200, tagSha = null } = {}) {
+  const calls = [];
+  const gh = (args, { input } = {}) => {
+    const methodIndex = args.indexOf('--method');
+    const method = methodIndex < 0 ? 'GET' : args[methodIndex + 1];
+    const endpoint = args[methodIndex < 0 ? 1 : methodIndex + 2];
+    calls.push({ method, endpoint, input });
+    const Respond = (status, body) => ({
+      status: status >= 400 ? 1 : 0,
+      stdout: `HTTP/2.0 ${status} Response\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(body)}`,
+      stderr: status >= 400 ? `gh: HTTP ${status}` : '',
+    });
+    if (method !== 'GET') throw new Error(`Unexpected mutation: ${method} ${endpoint}`);
+    if (endpoint.includes('/releases/tags/')) {
+      const tag = decodeURIComponent(endpoint.split('/releases/tags/')[1]);
+      const published = releases.find((release) => release.tag_name === tag && !release.draft);
+      return published ? Respond(200, published) : Respond(404, { message: 'Not Found' });
+    }
+    if (endpoint.includes('/releases?')) {
+      const query = new URLSearchParams(endpoint.split('?')[1]);
+      assert.equal(query.get('per_page'), '100');
+      const page = Number(query.get('page'));
+      assert.ok(page >= 1);
+      return Respond(listingStatus, listingStatus === 200
+        ? releases.slice((page - 1) * 100, page * 100)
+        : { message: 'Forbidden' });
+    }
+    if (endpoint.includes('/git/ref/tags/')) {
+      return tagSha
+        ? Respond(200, { object: { type: 'commit', sha: tagSha } })
+        : Respond(404, { message: 'Not Found' });
+    }
+    if (endpoint.includes('/collaborators/')) return Respond(200, { permission: 'write' });
+    if (endpoint.includes('/git/ref/heads/')) return Respond(200, { object: { sha: 'a'.repeat(40) } });
+    if (endpoint.startsWith('search/issues?')) return Respond(200, { items: [] });
+    if (endpoint.includes('/git/matching-refs/')) return Respond(200, []);
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
+  };
+  return { gh, calls };
+}
+
+function ApiDraft(id = 431708605) {
+  return {
+    id,
+    draft: true,
+    tag_name: 'v2.0.6+sps9.2.0',
+    body: request.changelogBody,
+    assets: MakeAssets().map((asset, index) => ({
+      id: index + 1,
+      name: asset.name,
+      digest: `sha256:${createHash('sha256').update(asset.data).digest('hex')}`,
+    })),
+  };
+}
+
+function UnrelatedReleases(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...ApiDraft(index + 1),
+    tag_name: `${ApiDraft().tag_name}-${index}`,
+  }));
+}
+
+test('HTTP publisher retry retains a unique draft ID hidden from the by-tag endpoint', async () => {
+  const draft = ApiDraft();
+  const { gh, calls } = ReleaseApiFixture([...UnrelatedReleases(100), draft], { tagSha: 'e'.repeat(40) });
+  const github = MakePublisher('fixture/SafeguardPowerBI', gh);
+  const args = {
+    tag: draft.tag_name, mergedSha: 'e'.repeat(40), targetBranch: request.targetBranch,
+    notes: request.changelogBody, assets: MakeAssets(), github,
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal((await PublishDraftRelease(args)).id, draft.id);
+  }
+  assert.equal(calls.filter((call) => call.method !== 'GET').length, 0);
+  assert.equal(calls.filter((call) => call.endpoint.endsWith('per_page=100&page=2')).length, 2);
+});
+
+test('HTTP publisher rejects duplicate drafts across pages before any mutation', async () => {
+  const draft = ApiDraft();
+  const { gh, calls } = ReleaseApiFixture([
+    draft, ...UnrelatedReleases(99), { ...draft, id: 431712520 },
+  ]);
+  await assert.rejects(PublishDraftRelease({
+    tag: draft.tag_name, mergedSha: 'e'.repeat(40), targetBranch: request.targetBranch,
+    notes: request.changelogBody, assets: MakeAssets(),
+    github: MakePublisher('fixture/SafeguardPowerBI', gh),
+  }), /[Mm]ultiple.*releases|[Aa]mbiguous|[Cc]onflict/);
+  assert.equal(calls.filter((call) => call.method !== 'GET').length, 0);
+});
+
+test('HTTP publisher rejects a public release before creating a missing tag', async () => {
+  const draft = ApiDraft();
+  const { gh, calls } = ReleaseApiFixture([...UnrelatedReleases(100), { ...draft, draft: false }]);
+  await assert.rejects(PublishDraftRelease({
+    tag: draft.tag_name, mergedSha: 'e'.repeat(40), targetBranch: request.targetBranch,
+    notes: request.changelogBody, assets: MakeAssets(),
+    github: MakePublisher('fixture/SafeguardPowerBI', gh),
+  }), /already public/);
+  assert.equal(calls.filter((call) => call.method !== 'GET').length, 0);
+});
+
+test('HTTP preparation sees existing drafts even when the tag ref is absent', async () => {
+  const { gh, calls } = ReleaseApiFixture([...UnrelatedReleases(100), ApiDraft()]);
+  await assert.rejects(CreatePreparationPlan({
+    issue, repository: 'fixture/SafeguardPowerBI', defaultBranch: 'main',
+    runId: 987, runAttempt: 1, github: GitHubAdapter('fixture/SafeguardPowerBI', gh),
+  }), /already exists/);
+  assert.equal(calls.filter((call) => call.method !== 'GET').length, 0);
+});
+
+test('HTTP adapters exhaust full pages, detect ambiguity, and fail closed on listing errors', async () => {
+  for (const Adapter of [GitHubAdapter, MakePublisher]) {
+    const absent = ReleaseApiFixture(UnrelatedReleases(100));
+    assert.equal(await Adapter('fixture/SafeguardPowerBI', absent.gh).GetRelease(ApiDraft().tag_name), null);
+    assert.ok(absent.calls.some((call) => call.endpoint.endsWith('per_page=100&page=2')));
+    const duplicate = ReleaseApiFixture([ApiDraft(), ApiDraft(431712520)]);
+    await assert.rejects(Adapter('fixture/SafeguardPowerBI', duplicate.gh).GetRelease(ApiDraft().tag_name),
+      /[Mm]ultiple.*releases|[Aa]mbiguous|[Cc]onflict/);
+    const forbidden = ReleaseApiFixture([], { listingStatus: 403 });
+    await assert.rejects(Adapter('fixture/SafeguardPowerBI', forbidden.gh).GetRelease(ApiDraft().tag_name),
+      /403/);
+  }
+});
 
 test('draft release workflow supports pre-automation targets using authenticated trusted runs', () => {
   const workflow = ReadDraftReleaseWorkflow();
