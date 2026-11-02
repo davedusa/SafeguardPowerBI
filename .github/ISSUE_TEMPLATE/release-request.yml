@@ -1,0 +1,62 @@
+name: Safeguard Sessions release request
+description: Request a Safeguard Sessions connector release.
+title: "Safeguard Sessions release request"
+labels:
+  - release-request
+body:
+  - type: input
+    id: release_request_marker
+    attributes:
+      label: Release request marker
+      description: Keep this required marker unchanged so automation can identify valid requests.
+      value: "safeguard-sessions-release-request-v1"
+    validations:
+      required: true
+  - type: input
+    id: connector_version
+    attributes:
+      label: Connector version
+      description: Replace the previous connector version for a new release. Use x.y.z.
+      value: "2.0.5"
+    validations:
+      required: true
+  - type: input
+    id: sps_version
+    attributes:
+      label: SPS version
+      description: Replace the previous SPS version for a new release. Use x.y.z.
+      value: "9.1.0"
+    validations:
+      required: true
+  - type: input
+    id: supported_versions
+    attributes:
+      label: Supported versions
+      description: Comma-separated SPS major.minor versions, ending with the SPS version above.
+      value: "7.3,7.4,7.5,8.0,8.1,8.2,9.0,9.1"
+    validations:
+      required: true
+  - type: input
+    id: source_branch
+    attributes:
+      label: Source branch
+      description: Branch to prepare the release from.
+      value: "main"
+    validations:
+      required: true
+  - type: input
+    id: target_branch
+    attributes:
+      label: Target branch
+      description: Branch for the generated release pull request.
+      value: "main"
+    validations:
+      required: true
+  - type: textarea
+    id: changelog_body
+    attributes:
+      label: Changelog body
+      description: Markdown body for the release notes, excluding the release version/date heading.
+      value: "### Compatible SPS Versions\n\n* Feature: 7.3.0 - 9.1.0\n* LTS: 8.0.0 - 9.0.0"
+    validations:
+      required: true
