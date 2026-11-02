@@ -1,0 +1,162 @@
+name: Prepare Safeguard Sessions release
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: sessions-release-preparation-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: windows-latest
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+    steps:
+      - name: Checkout trusted workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Authorize and validate issue snapshot
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" preflight
+
+  build:
+    needs: preflight
+    runs-on: windows-latest
+    outputs:
+      artifact_name: ${{ steps.finalize.outputs.artifact_name }}
+      commit_sha: ${{ steps.finalize.outputs.commit_sha }}
+      run_attempt: ${{ steps.finalize.outputs.run_attempt }}
+    steps:
+      - name: Checkout trusted workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout selected release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply request using trusted release helpers
+        shell: pwsh
+        env:
+          RELEASE_PLAN: ${{ needs.preflight.outputs.plan }}
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+          TRUSTED_DIRECTORY: ${{ github.workspace }}\trusted
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" prepare-files
+
+      - name: Bootstrap pinned build tools
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Bootstrap.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Safeguard Common
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Build.ps1" -Project SafeguardCommon
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Safeguard Sessions
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Build.ps1" -Project SafeguardSessions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Safeguard Common
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\RunUnitTests.ps1" -Project SafeguardCommon
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Safeguard Sessions
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\RunUnitTests.ps1" -Project SafeguardSessions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Commit only approved release files after all gates
+        id: finalize
+        shell: pwsh
+        env:
+          RELEASE_PLAN: ${{ needs.preflight.outputs.plan }}
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" finalize-preparation
+
+      - name: Save immutable prepared commit and metadata
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: ${{ steps.finalize.outputs.artifact_name }}
+          path: |
+            release-metadata.json
+            release.bundle
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: [preflight, build]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout selected source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download immutable preparation artifact
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: preparation
+
+      - name: Enable token-backed git authentication for publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          gh auth setup-git
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Push prepared commit and create selected-target PR
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          RELEASE_ARTIFACT_DIRECTORY: ${{ github.workspace }}\preparation
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+          PREFLIGHT_PLAN: ${{ needs.preflight.outputs.plan }}
+          PREPARED_COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
+          PREPARED_RUN_ATTEMPT: ${{ needs.build.outputs.run_attempt }}
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" publish-prepared

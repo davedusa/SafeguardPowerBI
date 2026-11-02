@@ -43,6 +43,25 @@ To run tests using **make** targets, you must include the path of the `PQTest.ex
 - Run all tests using `make unit-tests`
 - Run an individual test using `make unit-test test_file=<Path-To-The-Query-Pq-File>`
 
+### Safeguard Sessions release automation
+
+The GitHub issue form prepares a Safeguard Sessions release; merging its generated PR creates a **draft** release only. The automation never publishes a public release.
+
+Repository administrators must enable GitHub Actions, set workflow-token permissions to **Read and write permissions**, and allow Actions to create pull requests in **Settings > Actions > General**. The workflow requests read access for validation/build jobs and narrowly scoped `contents: write` / `pull-requests: write` access only for PR publication; draft publication receives `contents: write`. Do not add credentials to issue fields or workflow inputs.
+
+To rehearse the flow in a fork or test repository:
+
+1. Make sure the automation workflows and issue form are on that repository's default branch. GitHub only loads issue forms and issue-triggered workflows from the default branch.
+2. Select existing source and target branches. They may both remain `main`, as prefilled, or be different test branches; choose a target whose current commit is an ancestor of the eventual merge commit.
+3. Open a new **Safeguard Sessions release request** issue as an account with current `write`, `maintain`, or `admin` repository permission. Keep the required marker unchanged, use a unique unused connector/SPS version pair, and review the exact supported-version list and changelog body. The event snapshot is immutable to that workflow run; editing the issue does not amend an in-progress request.
+4. Follow the preparation run. It records source/target commit SHAs and release inputs in an immutable run artifact. The build/test job has no write token, uses the trusted default-branch scripts, and can only publish a branch after bootstrap, both builds, and both test suites succeed.
+5. Review the generated PR against the selected target branch. A human merge triggers a fresh build and tests at the exact merged commit; checksums are recalculated and all four non-empty assets are verified before the tag and draft release are created.
+6. To resume a failed post-merge upload, use **Actions > Draft Safeguard Sessions release > Re-run failed jobs**. The workflow re-authenticates the originating preparation run and immutable metadata, rebuilds from the merged SHA, reuses only a matching tag/draft, and uploads any missing or mismatched assets. Investigate any conflicting tag or public release rather than deleting or overwriting it.
+
+Use a new issue for corrected inputs after a preflight or build failure. If PR publication failed after the release branch was pushed, rerun the failed publication job; it reuses only the exact prepared commit and matching open PR. The automation never force-pushes or replaces a conflicting branch. A closed PR that was not merged is ignored. Because GitHub concurrency keeps only one pending run per group, rerun any preparation/publication run that GitHub marks canceled while waiting.
+
+PRs opened with the repository's `GITHUB_TOKEN` generally do **not** trigger other `pull_request` workflows, so required checks that depend on those events may remain pending. If required PR checks are configured, an administrator may approve a GitHub App installation token with only the needed contents/PR permissions, then store it as `RELEASE_AUTOMATION_TOKEN`; the preparation publication job uses it when present and otherwise falls back to `GITHUB_TOKEN`. Do not configure this token in a public fork without an explicit security review. This implementation changes no branch protections; the public test fork has no protections configured.
+
 ### Coding style
 
 To adhere with our coding style, consider the following when **writing code**:

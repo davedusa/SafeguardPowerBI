@@ -1,0 +1,177 @@
+name: Draft Safeguard Sessions release
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: sessions-release-publication-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    if: github.event.pull_request.merged == true
+    runs-on: windows-latest
+    outputs:
+      preparation_run_id: ${{ steps.locate.outputs.run_id }}
+      preparation_run_attempt: ${{ steps.locate.outputs.run_attempt }}
+      preparation_artifact_name: ${{ steps.locate.outputs.artifact_name }}
+      asset_artifact_name: ${{ steps.assets.outputs.artifact_name }}
+    steps:
+      - name: Checkout trusted default-branch automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Locate immutable preparation run
+        id: locate
+        shell: pwsh
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" locate-preparation
+
+      - name: Download immutable preparation metadata
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: ${{ steps.locate.outputs.artifact_name }}
+          run-id: ${{ steps.locate.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: preparation
+
+      - name: Checkout the exact merged commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify originating run, PR head, selected refs, and merged files
+        shell: pwsh
+        env:
+          PREPARATION_RUN_ID: ${{ steps.locate.outputs.run_id }}
+          PREPARATION_RUN_ATTEMPT: ${{ steps.locate.outputs.run_attempt }}
+          PREPARATION_METADATA_PATH: ${{ github.workspace }}\preparation\release-metadata.json
+          PREPARATION_BUNDLE_PATH: ${{ github.workspace }}\preparation\release.bundle
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" verify-merged
+
+      - name: Install trusted hardened build scripts
+        shell: pwsh
+        env:
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+          TRUSTED_DIRECTORY: ${{ github.workspace }}\trusted
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" copy-trusted-scripts
+
+      - name: Bootstrap pinned build tools
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Bootstrap.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Safeguard Common
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Build.ps1" -Project SafeguardCommon
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Safeguard Sessions
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\Build.ps1" -Project SafeguardSessions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Safeguard Common
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\RunUnitTests.ps1" -Project SafeguardCommon
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test Safeguard Sessions
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\RunUnitTests.ps1" -Project SafeguardSessions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate Sessions SHA-256 files
+        shell: pwsh
+        run: |
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\source\Environment\Scripts\CheckSum.ps1" -Project SafeguardSessions
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify and package all four release assets
+        id: assets
+        shell: pwsh
+        env:
+          PREPARATION_METADATA_PATH: ${{ github.workspace }}\preparation\release-metadata.json
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" verify-assets
+
+      - name: Save rebuilt release assets
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: ${{ steps.assets.outputs.artifact_name }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    if: github.event.pull_request.merged == true
+    needs: rebuild
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout trusted default-branch automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Locate immutable preparation run
+        id: locate
+        shell: pwsh
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" locate-preparation
+
+      - name: Download immutable preparation metadata
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: ${{ steps.locate.outputs.artifact_name }}
+          run-id: ${{ steps.locate.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: preparation
+
+      - name: Download rebuilt release assets
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: ${{ needs.rebuild.outputs.asset_artifact_name }}
+          path: release-assets
+
+      - name: Checkout the exact merged commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create or safely resume a draft release
+        shell: pwsh
+        env:
+          PREPARATION_RUN_ID: ${{ steps.locate.outputs.run_id }}
+          PREPARATION_RUN_ATTEMPT: ${{ steps.locate.outputs.run_attempt }}
+          PREPARATION_METADATA_PATH: ${{ github.workspace }}\preparation\release-metadata.json
+          PREPARATION_BUNDLE_PATH: ${{ github.workspace }}\preparation\release.bundle
+          RELEASE_ASSET_DIRECTORY: ${{ github.workspace }}\release-assets
+          SOURCE_DIRECTORY: ${{ github.workspace }}\source
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" publish-draft

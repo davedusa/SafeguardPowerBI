@@ -38,6 +38,18 @@ function LogFail {
     )
     Write-Host "$($testResult.Name): " -NoNewline
     Write-Host "Fail" -ForegroundColor red
+    if ($testResult.Output -is [System.Array]) {
+        foreach ($output in $testResult.Output) {
+            if (-not [string]::IsNullOrWhiteSpace($output.Notes)) {
+                Write-Host "Details: $($output.Notes)"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($output.Details)) {
+                Write-Host "Details: $($output.Details)"
+            }
+        }
+        return
+    }
+
     for (($i = 1); $i -lt $testResult.Output.Details.Length; $i++) {
         $cleanedTestResult = $testResult.Output[$i].Details.Trim()
         # remove opening and closing parenthesis and split string to expected and actual output
@@ -81,13 +93,13 @@ if ($pqtestOutputText.TrimStart()[0] -ne "[") {
 }
 
 try {
-    $resultsAsObject = @(ConvertFrom-Json -InputObject $pqtestOutputText -ErrorAction Stop)
+    $resultsAsObject = $pqtestOutputText | ConvertFrom-Json -ErrorAction Stop
 }
 catch {
     throw "pqtest returned malformed JSON: $($_.Exception.Message)"
 }
 
-if ($resultsAsObject.Count -eq 0) {
+if ($null -eq $resultsAsObject -or @($resultsAsObject).Count -eq 0) {
     throw "pqtest returned an empty test-results array."
 }
 
@@ -97,28 +109,57 @@ foreach ($result in $resultsAsObject) {
         throw "pqtest returned a result with an invalid structure."
     }
 
-    $resultStatus = $result.Output.PSObject.Properties["Result"]
-    if ($null -eq $resultStatus) {
-        throw "pqtest returned a result without a status field."
+    $topLevelStatus = $result.PSObject.Properties["Status"]
+    if ($null -ne $topLevelStatus -and $topLevelStatus.Value -notin @("Passed", "Success", "Failed", "Fail", "Error")) {
+        throw "pqtest returned an unsupported result status '$($topLevelStatus.Value)'."
     }
 
-    if ($null -eq $resultStatus.Value) {
-        if ($null -eq $result.Error) {
-            throw "pqtest returned a result without a status or error details."
+    $outputItems = @($result.Output)
+    if ($outputItems.Count -eq 0) {
+        throw "pqtest returned a result with an empty output array."
+    }
+
+    $observedStatus = $false
+    $resultFailed = $null -ne $topLevelStatus -and $topLevelStatus.Value -in @("Failed", "Fail", "Error")
+    foreach ($outputItem in $outputItems) {
+        if ($null -eq $outputItem) {
+            throw "pqtest returned an empty output result."
         }
 
-        $isEveryTestSuccessful = $false
-        LogError($result)
+        $resultStatus = $outputItem.PSObject.Properties["Result"]
+        if ($null -eq $resultStatus) {
+            throw "pqtest returned a result without a status field."
+        }
+
+        if ($null -eq $resultStatus.Value) {
+            if ($null -eq $result.Error) {
+                throw "pqtest returned a result without a status or error details."
+            }
+
+            $resultFailed = $true
+            LogError($result)
+        }
+        elseif ($resultStatus.Value -eq "Success") {
+            $observedStatus = $true
+        }
+        elseif ($resultStatus.Value -eq "Fail") {
+            $observedStatus = $true
+            $resultFailed = $true
+        }
+        else {
+            throw "pqtest returned an unsupported result status '$($resultStatus.Value)'."
+        }
     }
-    elseif ($resultStatus.Value -eq "Success") {
-        LogSuccess($result)
+
+    if (-not $observedStatus -and $null -eq $result.Error) {
+        throw "pqtest returned no recognized test-result status."
     }
-    elseif ($resultStatus.Value -eq "Fail") {
+    if ($resultFailed) {
         $isEveryTestSuccessful = $false
         LogFail($result)
     }
     else {
-        throw "pqtest returned an unsupported result status '$($resultStatus.Value)'."
+        LogSuccess($result)
     }
 }
 
