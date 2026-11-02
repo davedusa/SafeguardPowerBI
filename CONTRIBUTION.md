@@ -47,6 +47,8 @@ To run tests using **make** targets, you must include the path of the `PQTest.ex
 
 The GitHub issue form prepares a Safeguard Sessions release; merging its generated PR creates a **draft** release only. The automation never publishes a public release.
 
+The post-merge workflow uses `pull_request_target` for closed PRs so selected target branches that predate the workflow still trigger it. It checks out and executes only trusted default-branch automation in the credentialed publish job; it does not execute PR source code there. The rebuild job uses read-only permissions, and both jobs verify and use the exact `merge_commit_sha` from the event before release publication.
+
 Repository administrators must enable GitHub Actions, set workflow-token permissions to **Read and write permissions**, and allow Actions to create pull requests in **Settings > Actions > General**. The workflow requests read access for validation/build jobs and narrowly scoped `contents: write` / `pull-requests: write` access only for PR publication; draft publication receives `contents: write`. Do not add credentials to issue fields or workflow inputs.
 
 To rehearse the flow in a fork or test repository:
