@@ -1,5 +1,18 @@
 # Changelog
 
+## [v2.0.9001102+sps9.1.1] - 2026-11-02
+
+### Compatible SPS Versions
+
+* Feature: 7.3.0 - 9.1.1
+* LTS: 8.0.0 - 9.0.0
+
+### Rehearsal notes
+
+Hypothetical connector release; never publish this draft.
+
+> Preserve "quoted text", blank lines, and Unicode: café.
+
 ## [v2.0.5+sps9.1.0] - 2026-10-28
 
 ### Compatible SPS Versions
