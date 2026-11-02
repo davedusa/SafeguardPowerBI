@@ -62,6 +62,8 @@ To rehearse the flow in a fork or test repository:
 
 Use a new issue for corrected inputs after a preflight or build failure. If PR publication failed after the release branch was pushed, rerun the failed publication job; it reuses only the exact prepared commit and matching open PR. The automation never force-pushes or replaces a conflicting branch. A closed PR that was not merged is ignored. Because GitHub concurrency keeps only one pending run per group, rerun any preparation/publication run that GitHub marks canceled while waiting.
 
+Preparation commits must change the connector and changelog and may only change the four approved release paths: the connector, supported versions module, changelog, and release request form. The supported versions module and form may remain unchanged when their contents already match the request (for example, an SPS patch release). All four final file contents are still verified; trusted build-script overlays are not included in the release commit.
+
 PRs opened with the repository's `GITHUB_TOKEN` generally do **not** trigger other `pull_request` workflows, so required checks that depend on those events may remain pending. If required PR checks are configured, an administrator may approve a GitHub App installation token with only the needed contents/PR permissions, then store it as `RELEASE_AUTOMATION_TOKEN`; the preparation publication job uses it when present and otherwise falls back to `GITHUB_TOKEN`. Do not configure this token in a public fork without an explicit security review. This implementation changes no branch protections; the public test fork has no protections configured.
 
 ### Coding style

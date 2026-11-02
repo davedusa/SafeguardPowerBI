@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -12,7 +13,180 @@ const {
   ValidatePreparationMetadata,
   ValidatePreparedArtifact,
   PublishDraftRelease,
+  VerifyCommitFiles,
 } = require('./Workflow.cjs');
+const { VerifyReleaseFiles } = require('./Request.cjs');
+
+function PreparationFixture(t) {
+  const trusted = path.resolve(__dirname, '..', '..');
+  const workspace = fs.mkdtempSync(path.join(__dirname, 'WorkflowFixture-'));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true, maxRetries: 5 }));
+  const root = path.join(workspace, 'source');
+  function Git(...args) {
+    const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    return result.stdout.trim();
+  }
+  const clone = spawnSync('git', ['clone', '--shared', '--no-checkout', trusted, root], {
+    encoding: 'utf8', windowsHide: true,
+  });
+  assert.equal(clone.status, 0, clone.stderr);
+  Git('config', 'core.autocrlf', 'false');
+  Git('config', 'user.name', 'Release test');
+  Git('config', 'user.email', 'release-test@example.invalid');
+  Git('config', 'commit.gpgsign', 'false');
+  Git('checkout', '--detach', 'd685181caf38afe4b2b51e44e05266ff0b4e4ae0');
+  const sha = Git('rev-parse', 'HEAD');
+  const releaseRequest = {
+    connectorVersion: '2.0.9001102',
+    spsVersion: '9.1.1',
+    supportedVersions: ['7.3', '7.4', '7.5', '8.0', '8.1', '8.2', '9.0', '9.1'],
+    sourceBranch: 'fixture/source',
+    targetBranch: 'fixture/target',
+    changelogBody: '### Compatible SPS Versions\n\n* Feature: 7.3.0 - 9.1.1',
+  };
+  const plan = {
+    schemaVersion: 1,
+    repository: 'fixture/SafeguardPowerBI',
+    workflowPath: '.github/workflows/prepare-release.yml',
+    automationSha: Git('rev-parse', 'origin/HEAD'),
+    runId: 41481114369,
+    runAttempt: 1,
+    issueNumber: 123,
+    issueAuthor: 'release-author',
+    request: releaseRequest,
+    source: { branch: releaseRequest.sourceBranch, sha },
+    target: { branch: releaseRequest.targetBranch, sha },
+    release: { tag: 'v2.0.9001102+sps9.1.1', commitSha: null },
+  };
+  function Cli(command) {
+    return spawnSync(process.execPath, [path.join(__dirname, 'Workflow.cjs'), command], {
+      cwd: trusted,
+      encoding: 'utf8',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        SOURCE_DIRECTORY: root,
+        TRUSTED_DIRECTORY: trusted,
+        RELEASE_PLAN: Buffer.from(JSON.stringify(plan)).toString('base64'),
+        GITHUB_RUN_ID: String(plan.runId),
+        GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_WORKSPACE: workspace,
+        GITHUB_OUTPUT: path.join(workspace, 'outputs'),
+        GITHUB_STEP_SUMMARY: path.join(workspace, 'summary'),
+      },
+    });
+  }
+  const supportedVersions = fs.readFileSync(
+    path.join(root, 'SafeguardSessions', 'Src', 'Modules', 'Version', 'SupportedVersions.pqm'),
+    'utf8',
+  );
+  const prepared = Cli('prepare-files');
+  assert.equal(prepared.status, 0, prepared.stderr || prepared.stdout);
+  return { root, workspace, plan, supportedVersions, Git, Cli };
+}
+
+test('preparation CLI accepts an SPS patch with unchanged supported versions', (t) => {
+  const fixture = PreparationFixture(t);
+  const { root, workspace, plan, Git, Cli } = fixture;
+  const supportedPath = 'SafeguardSessions/Src/Modules/Version/SupportedVersions.pqm';
+  assert.equal(
+    fs.readFileSync(path.join(root, supportedPath), 'utf8'),
+    fixture.supportedVersions,
+  );
+  assert.equal(Git('diff', '--name-only', '--', supportedPath), '');
+  const finalized = Cli('finalize-preparation');
+  assert.equal(finalized.status, 0, finalized.stderr || finalized.stdout);
+  const metadata = JSON.parse(fs.readFileSync(path.join(workspace, 'release-metadata.json'), 'utf8'));
+  assert.equal(Git('rev-parse', 'HEAD^'), plan.source.sha);
+  assert.deepEqual(Git('diff', '--name-only', `${plan.source.sha}..HEAD`).split('\n').sort(), [
+    '.github/ISSUE_TEMPLATE/release-request.yml',
+    'SafeguardSessions/CHANGELOG.md',
+    'SafeguardSessions/Src/SafeguardSessions.pq',
+  ]);
+  const verified = VerifyCommitFiles(root, metadata);
+  assert.equal(VerifyReleaseFiles(verified.files, plan.request).valid, true);
+  assert.equal(verified.notes, plan.request.changelogBody);
+  Git('bundle', 'verify', path.join(workspace, 'release.bundle'));
+});
+
+test('preparation CLI accepts an already matching form without changing it', (t) => {
+  const { root, workspace, plan, Git, Cli } = PreparationFixture(t);
+  Git('add', '--', '.github/ISSUE_TEMPLATE/release-request.yml');
+  Git('commit', '-m', 'Fixture matching form');
+  plan.source.sha = Git('rev-parse', 'HEAD');
+  plan.target.sha = plan.source.sha;
+  const finalized = Cli('finalize-preparation');
+  assert.equal(finalized.status, 0, finalized.stderr || finalized.stdout);
+  assert.deepEqual(Git('diff', '--name-only', `${plan.source.sha}..HEAD`).split('\n').sort(), [
+    'SafeguardSessions/CHANGELOG.md',
+    'SafeguardSessions/Src/SafeguardSessions.pq',
+  ]);
+  const metadata = JSON.parse(fs.readFileSync(path.join(workspace, 'release-metadata.json'), 'utf8'));
+  assert.equal(VerifyCommitFiles(root, metadata).notes, plan.request.changelogBody);
+});
+
+test('preparation CLI rejects unrelated staged files without committing', (t) => {
+  const { root, workspace, plan, Git, Cli } = PreparationFixture(t);
+  fs.appendFileSync(path.join(root, 'README.md'), '\nUnrelated staged change.\n');
+  Git('add', '--', 'README.md');
+  const finalized = Cli('finalize-preparation');
+  assert.notEqual(finalized.status, 0);
+  assert.match(finalized.stderr, /outside the four approved release/);
+  assert.equal(Git('rev-parse', 'HEAD'), plan.source.sha);
+  assert.equal(fs.existsSync(path.join(workspace, 'release-metadata.json')), false);
+});
+
+test('preparation CLI rejects an unrelated source commit', (t) => {
+  const { root, workspace, Git, Cli } = PreparationFixture(t);
+  fs.appendFileSync(path.join(root, 'README.md'), '\nUnrelated commit.\n');
+  Git('add', '--', 'README.md');
+  Git('commit', '-m', 'Unrelated fixture commit');
+  const sourceHead = Git('rev-parse', 'HEAD');
+  const finalized = Cli('finalize-preparation');
+  assert.notEqual(finalized.status, 0);
+  assert.match(finalized.stderr, /Source checkout does not match the selected source commit/);
+  assert.equal(Git('rev-parse', 'HEAD'), sourceHead);
+  assert.equal(fs.existsSync(path.join(workspace, 'release-metadata.json')), false);
+});
+
+test('preparation CLI requires a connector change', (t) => {
+  const { workspace, plan, Git, Cli } = PreparationFixture(t);
+  Git('restore', '--', 'SafeguardSessions/Src/SafeguardSessions.pq');
+  const finalized = Cli('finalize-preparation');
+  assert.notEqual(finalized.status, 0);
+  assert.match(finalized.stderr, /must change the connector and changelog/);
+  assert.equal(Git('rev-parse', 'HEAD'), plan.source.sha);
+  assert.equal(fs.existsSync(path.join(workspace, 'release-metadata.json')), false);
+});
+
+test('prepared commit verification rejects unrelated paths and invalid final contents', (t) => {
+  const { root, workspace, Git, Cli } = PreparationFixture(t);
+  const finalized = Cli('finalize-preparation');
+  assert.equal(finalized.status, 0, finalized.stderr || finalized.stdout);
+  const metadata = JSON.parse(fs.readFileSync(path.join(workspace, 'release-metadata.json'), 'utf8'));
+  const releaseSha = metadata.release.commitSha;
+  for (const [file, text, expected] of [
+    ['README.md', 'Unrelated committed change.\n', /outside the four approved release/],
+    ['SafeguardSessions/Src/Modules/Version/SupportedVersions.pqm', 'invalid\n', /Prepared release files are invalid/],
+    ['.github/ISSUE_TEMPLATE/release-request.yml', 'invalid\n', /Release issue form/],
+    ['SafeguardSessions/Src/SafeguardSessions.pq', null, /must change the connector and changelog/],
+    ['SafeguardSessions/CHANGELOG.md', null, /must change the connector and changelog/],
+  ]) {
+    Git('reset', '--hard', releaseSha);
+    if (text === null) {
+      Git('restore', `--source=${metadata.source.sha}`, '--', file);
+    } else {
+      fs.writeFileSync(path.join(root, file), text);
+    }
+    Git('add', '--', file);
+    Git('commit', '--amend', '--no-edit');
+    assert.throws(
+      () => VerifyCommitFiles(root, { ...metadata, release: { ...metadata.release, commitSha: Git('rev-parse', 'HEAD') } }),
+      expected,
+    );
+  }
+});
 
 function ReadDraftReleaseWorkflow() {
   return fs.readFileSync(

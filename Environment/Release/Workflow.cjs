@@ -486,10 +486,19 @@ function ReadGitFile(root, commit, file) {
   return Git(root, ['show', `${commit}:${file}`]).stdout;
 }
 
+function VerifyReleasePaths(changed, description) {
+  Assert(changed.every((file) => RELEASE_PATHS.includes(file)), `${description} includes files outside the four approved release paths`);
+  const required = [
+    'SafeguardSessions/Src/SafeguardSessions.pq',
+    'SafeguardSessions/CHANGELOG.md',
+  ];
+  Assert(required.every((file) => changed.includes(file)), `${description} must change the connector and changelog`);
+}
+
 function VerifyCommitFiles(root, plan) {
   const changed = Git(root, ['diff', '--name-only', `${plan.source.sha}..${plan.release.commitSha}`])
     .stdout.split(/\r?\n/).filter(Boolean).sort();
-  Assert(JSON.stringify(changed) === JSON.stringify([...RELEASE_PATHS].sort()), 'Prepared release commit changes files outside the four approved release files');
+  VerifyReleasePaths(changed, 'Prepared release commit');
 
   const files = {
     connector: ReadGitFile(root, plan.release.commitSha, 'SafeguardSessions/Src/SafeguardSessions.pq'),
@@ -669,7 +678,7 @@ function FinalizePreparation() {
   Git(root, ['switch', '-c', plan.release.branch]);
   Git(root, ['add', '--', ...RELEASE_PATHS]);
   const staged = Git(root, ['diff', '--cached', '--name-only']).stdout.split(/\r?\n/).filter(Boolean).sort();
-  Assert(JSON.stringify(staged) === JSON.stringify([...RELEASE_PATHS].sort()), 'Only the four intended release files may be staged');
+  VerifyReleasePaths(staged, 'Staged release changes');
   const files = ReadReleaseFiles(root);
   const verified = VerifyReleaseFiles(files, plan.request);
   Assert(verified.valid, `Release changes are invalid: ${verified.errors.join('; ')}`);
@@ -678,13 +687,11 @@ function FinalizePreparation() {
     '-c', 'user.name=Copilot',
     '-c', 'user.email=223556219+Copilot@users.noreply.github.com',
     'commit', '-m', 'Safeguard Sessions: prepare release',
-    '-m', `Prepare ${plan.release.tag} from ${plan.source.branch}.\n\nReferences: #${plan.issueNumber}\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`,
+    '-m', `Scope: SafeguardSessions/ and .github/ISSUE_TEMPLATE/release-request.yml.\n\nPrepare ${plan.release.tag} from ${plan.source.branch}.\n\nReferences: #${plan.issueNumber}\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`,
   ]);
   plan.release.commitSha = Git(root, ['rev-parse', 'HEAD']).stdout.trim();
   Assert(HEX_SHA.test(plan.release.commitSha), 'Prepared release commit SHA is invalid');
-  const changed = Git(root, ['diff', '--name-only', `${plan.source.sha}..${plan.release.commitSha}`])
-    .stdout.split(/\r?\n/).filter(Boolean).sort();
-  Assert(JSON.stringify(changed) === JSON.stringify([...RELEASE_PATHS].sort()), 'Prepared commit includes files outside the four approved release files');
+  VerifyCommitFiles(root, plan);
   const metadataPath = path.join(process.env.GITHUB_WORKSPACE, 'release-metadata.json');
   const bundlePath = path.join(process.env.GITHUB_WORKSPACE, 'release.bundle');
   fs.writeFileSync(metadataPath, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
@@ -989,6 +996,7 @@ module.exports = {
   ValidatePreparedArtifact,
   ValidateReleaseAssets,
   PublishDraftRelease,
+  VerifyCommitFiles,
 };
 
 if (require.main === module) {
