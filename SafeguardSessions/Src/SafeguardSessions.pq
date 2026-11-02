@@ -1,4 +1,4 @@
-﻿[Version = "2.0.5"]
+﻿[Version = "2.0.9001103"]
 section SafeguardSessions;
 
 [DataSource.Kind = "SafeguardSessions", Publish = "SafeguardSessions.Publish"]
