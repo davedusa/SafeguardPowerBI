@@ -14,7 +14,7 @@ const REQUEST_MARKER = 'safeguard-sessions-release-request-v1';
 const VERSION_TRIPLE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const VERSION_PAIR = /^(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
-function parseRequest(issueBody) {
+function ParseRequest(issueBody) {
   if (typeof issueBody !== 'string') {
     throw new TypeError('Issue body must be a string');
   }
@@ -70,7 +70,7 @@ function parseRequest(issueBody) {
   return request;
 }
 
-function validateRequest(request) {
+function ValidateRequest(request) {
   const errors = [];
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     return { valid: false, errors: ['Request must be an object'] };
@@ -123,20 +123,20 @@ function validateRequest(request) {
   return { valid: errors.length === 0, errors };
 }
 
-function requireValidRequest(request) {
-  const validation = validateRequest(request);
+function RequireValidRequest(request) {
+  const validation = ValidateRequest(request);
   if (!validation.valid) {
     throw new Error(validation.errors.join('; '));
   }
 }
 
-function getVersionDeclaration(connector) {
+function GetVersionDeclaration(connector) {
   if (typeof connector !== 'string') return null;
   const declarations = [...connector.matchAll(/^\uFEFF?\[Version = "([^"]+)"\]/gm)];
   return declarations.length === 1 ? declarations[0] : null;
 }
 
-function getSupportedDeclaration(source) {
+function GetSupportedDeclaration(source) {
   if (typeof source !== 'string') return null;
   const declarations = [...source.matchAll(/(SupportedVersions\.LatestVersion\s*=\s*")([^"]+)(",\s*SupportedVersions\.Versions\s*=\s*\{)([^}]*)(\})/g)];
   if (declarations.length !== 1) return null;
@@ -152,7 +152,7 @@ function getSupportedDeclaration(source) {
   return { latestVersion, versions: entries, match: declarations[0] };
 }
 
-function replaceFormValue(form, fieldId, value) {
+function ReplaceFormValue(form, fieldId, value) {
   if (typeof form !== 'string') throw new TypeError('Issue form must be a string');
   const newline = form.includes('\r\n') ? '\r\n' : '\n';
   const lines = form.split(/\r?\n/);
@@ -186,7 +186,7 @@ function replaceFormValue(form, fieldId, value) {
   return lines.join(newline);
 }
 
-function updateFormDefaults(form, request) {
+function UpdateFormDefaults(form, request) {
   const replacements = [
     ['connector_version', request.connectorVersion],
     ['sps_version', request.spsVersion],
@@ -194,36 +194,36 @@ function updateFormDefaults(form, request) {
     ['changelog_body', request.changelogBody],
   ];
   return replacements.reduce(
-    (updatedForm, [fieldId, value]) => replaceFormValue(updatedForm, fieldId, value),
+    (updatedForm, [fieldId, value]) => ReplaceFormValue(updatedForm, fieldId, value),
     form,
   );
 }
 
-function assertUniqueReleaseEntry(changelog, connectorVersion, spsVersion) {
+function AssertUniqueReleaseEntry(changelog, connectorVersion, spsVersion) {
   const expectedHeading = new RegExp(
-    `^## \\[v${escapeRegExp(connectorVersion)}\\+sps${escapeRegExp(spsVersion)}\\] - \\d{4}-\\d{2}-\\d{2}[ \\t]*$`,
+    `^## \\[v${EscapeRegExp(connectorVersion)}\\+sps${EscapeRegExp(spsVersion)}\\] - \\d{4}-\\d{2}-\\d{2}[ \\t]*$`,
     'gm',
   );
   return [...changelog.matchAll(expectedHeading)];
 }
 
-function escapeRegExp(value) {
+function EscapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function validDate(date) {
+function ValidDate(date) {
   if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
   const parsed = new Date(`${date}T00:00:00.000Z`);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === date;
 }
 
-function prependChangelogEntry(changelog, request, date) {
+function PrependChangelogEntry(changelog, request, date) {
   if (typeof changelog !== 'string') throw new TypeError('Changelog must be a string');
   const eol = changelog.includes('\r\n') ? '\r\n' : '\n';
   const header = /^# Changelog[ \t]*$/gm;
   const headers = [...changelog.matchAll(header)];
   if (headers.length !== 1) throw new Error('Changelog must contain exactly one # Changelog heading');
-  if (assertUniqueReleaseEntry(changelog, request.connectorVersion, request.spsVersion).length > 0) {
+  if (AssertUniqueReleaseEntry(changelog, request.connectorVersion, request.spsVersion).length > 0) {
     throw new Error('Changelog already contains this release');
   }
 
@@ -233,19 +233,19 @@ function prependChangelogEntry(changelog, request, date) {
   return `${changelog.slice(0, index)}${eol}${eol}${heading}${eol}${eol}${request.changelogBody}${eol}${eol}${remaining}`;
 }
 
-function updateReleaseFiles(files, request, releaseDate) {
-  requireValidRequest(request);
+function UpdateReleaseFiles(files, request, releaseDate) {
+  RequireValidRequest(request);
   if (!files || typeof files !== 'object') throw new TypeError('Release files must be an object');
-  if (!validDate(releaseDate)) throw new Error('Release date must be a real YYYY-MM-DD date');
+  if (!ValidDate(releaseDate)) throw new Error('Release date must be a real YYYY-MM-DD date');
 
-  const connectorDeclaration = getVersionDeclaration(files.connector);
+  const connectorDeclaration = GetVersionDeclaration(files.connector);
   if (!connectorDeclaration) throw new Error('Connector source must contain exactly one version declaration');
   const connector = files.connector.replace(
     connectorDeclaration[0],
     connectorDeclaration[0].replace(connectorDeclaration[1], request.connectorVersion),
   );
 
-  const supportedDeclaration = getSupportedDeclaration(files.supportedVersions);
+  const supportedDeclaration = GetSupportedDeclaration(files.supportedVersions);
   if (!supportedDeclaration) throw new Error('Supported versions source has an unsupported structure');
   const latestVersion = request.spsVersion.split('.').slice(0, 2).join('.');
   const listText = request.supportedVersions.map((version) => `"${version}"`).join(', ');
@@ -258,12 +258,12 @@ function updateReleaseFiles(files, request, releaseDate) {
     ...files,
     connector,
     supportedVersions,
-    changelog: prependChangelogEntry(files.changelog, request, releaseDate),
-    form: updateFormDefaults(files.form, request),
+    changelog: PrependChangelogEntry(files.changelog, request, releaseDate),
+    form: UpdateFormDefaults(files.form, request),
   };
 }
 
-function getReleaseNotes(changelog, headingMatches) {
+function GetReleaseNotes(changelog, headingMatches) {
   if (headingMatches.length !== 1) return null;
   const heading = headingMatches[0];
   const start = heading.index + heading[0].length;
@@ -277,16 +277,16 @@ function getReleaseNotes(changelog, headingMatches) {
   return notes;
 }
 
-function verifyReleaseFiles(files, request) {
-  const validation = validateRequest(request);
+function VerifyReleaseFiles(files, request) {
+  const validation = ValidateRequest(request);
   if (!validation.valid) return { valid: false, errors: validation.errors, notes: null };
   const errors = [];
-  const connectorDeclaration = getVersionDeclaration(files?.connector);
+  const connectorDeclaration = GetVersionDeclaration(files?.connector);
   if (!connectorDeclaration || connectorDeclaration[1] !== request.connectorVersion) {
     errors.push('Connector version does not match the request');
   }
 
-  const supportedDeclaration = getSupportedDeclaration(files?.supportedVersions);
+  const supportedDeclaration = GetSupportedDeclaration(files?.supportedVersions);
   const expectedLatest = request.spsVersion.split('.').slice(0, 2).join('.');
   if (!supportedDeclaration || supportedDeclaration.latestVersion !== expectedLatest) {
     errors.push('Latest SPS version does not match the request');
@@ -297,7 +297,7 @@ function verifyReleaseFiles(files, request) {
 
   const changelog = files?.changelog;
   const headingMatches = typeof changelog === 'string'
-    ? assertUniqueReleaseEntry(changelog, request.connectorVersion, request.spsVersion)
+    ? AssertUniqueReleaseEntry(changelog, request.connectorVersion, request.spsVersion)
     : [];
   if (headingMatches.length === 0) {
     errors.push('Changelog release entry does not match the request');
@@ -311,7 +311,7 @@ function verifyReleaseFiles(files, request) {
     }
   }
   const notes = typeof changelog === 'string'
-    ? getReleaseNotes(changelog, headingMatches)
+    ? GetReleaseNotes(changelog, headingMatches)
     : null;
   if (notes !== null && notes !== request.changelogBody) {
     errors.push('Changelog body does not match the request');
@@ -321,8 +321,8 @@ function verifyReleaseFiles(files, request) {
 }
 
 module.exports = {
-  parseRequest,
-  validateRequest,
-  updateReleaseFiles,
-  verifyReleaseFiles,
+  ParseRequest,
+  ValidateRequest,
+  UpdateReleaseFiles,
+  VerifyReleaseFiles,
 };

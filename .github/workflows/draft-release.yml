@@ -1,7 +1,7 @@
 name: Draft Safeguard Sessions release
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
 
 permissions:
@@ -33,6 +33,8 @@ jobs:
       - name: Locate immutable preparation run
         id: locate
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" locate-preparation
 
       - name: Download immutable preparation metadata
@@ -140,6 +142,8 @@ jobs:
       - name: Locate immutable preparation run
         id: locate
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node "$env:GITHUB_WORKSPACE\trusted\Environment\Release\Workflow.cjs" locate-preparation
 
       - name: Download immutable preparation metadata
