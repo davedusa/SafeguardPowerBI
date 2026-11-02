@@ -66,20 +66,59 @@ $pqtestOutput = pqtest run-test `
     --queryFile $testInput `
     --prettyPrint 
 
-$resultsAsObject = $pqtestOutput | ConvertFrom-Json
+$pqtestExitCode = $LASTEXITCODE
+if ($pqtestExitCode -ne 0) {
+    throw "pqtest failed with exit code $pqtestExitCode."
+}
+
+$pqtestOutputText = @($pqtestOutput) -join [Environment]::NewLine
+if ([string]::IsNullOrWhiteSpace($pqtestOutputText)) {
+    throw "pqtest returned no test results."
+}
+
+if ($pqtestOutputText.TrimStart()[0] -ne "[") {
+    throw "pqtest returned results in an invalid format. Expected a JSON array."
+}
+
+try {
+    $resultsAsObject = @(ConvertFrom-Json -InputObject $pqtestOutputText -ErrorAction Stop)
+}
+catch {
+    throw "pqtest returned malformed JSON: $($_.Exception.Message)"
+}
+
+if ($resultsAsObject.Count -eq 0) {
+    throw "pqtest returned an empty test-results array."
+}
 
 $isEveryTestSuccessful = $true
 foreach ($result in $resultsAsObject) {
-    if ($null -eq $result.Output.Result) { 
+    if ($null -eq $result -or [string]::IsNullOrWhiteSpace($result.Name) -or $null -eq $result.Output) {
+        throw "pqtest returned a result with an invalid structure."
+    }
+
+    $resultStatus = $result.Output.PSObject.Properties["Result"]
+    if ($null -eq $resultStatus) {
+        throw "pqtest returned a result without a status field."
+    }
+
+    if ($null -eq $resultStatus.Value) {
+        if ($null -eq $result.Error) {
+            throw "pqtest returned a result without a status or error details."
+        }
+
         $isEveryTestSuccessful = $false
         LogError($result)
     }
-    elseif ($result.Output.Result -eq "Success") {
+    elseif ($resultStatus.Value -eq "Success") {
         LogSuccess($result)
     }
-    else {
+    elseif ($resultStatus.Value -eq "Fail") {
         $isEveryTestSuccessful = $false
         LogFail($result)
+    }
+    else {
+        throw "pqtest returned an unsupported result status '$($resultStatus.Value)'."
     }
 }
 
